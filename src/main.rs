@@ -5,7 +5,8 @@
 use clap::{Parser, Subcommand, ValueEnum};
 use clap_i18n_richformatter::{clap_i18n, ClapI18nRichFormatter, init_clap_rich_formatter_localizer};
 use env_logger::Env;
-use minijinja::{context, Environment};
+use minijinja::{context, value::ValueKind, Environment, Output, State, Value, AutoEscape};
+use teloxide::utils::{html, markdown};
 use reqwest::{ClientBuilder, Proxy};
 use serde::Serialize;
 use std::future::Future;
@@ -88,7 +89,7 @@ enum Commands {
         #[arg(help = fl!("arg-channel"))]
         channel: Option<u32>,
 
-        #[arg(long, env = "TELEGRAM_TEMPLATE", default_value = "<b>{{ from | e }}</b> (via <i>{{ via }}</i>)\n<blockquote>{{ text | e }}</blockquote>")]
+        #[arg(long, env = "TELEGRAM_TEMPLATE", default_value = "<b>{{ from }}</b> (via <i>{{ via }}</i>)\n<blockquote>{{ text }}</blockquote>")]
         #[arg(help = fl!("arg-template"))]
         template: String,
 
@@ -217,6 +218,46 @@ fn unescape_template(s: String) -> String {
     }
 
     result
+}
+
+fn telegram_escape_formatter(out: &mut Output, state: &State, value: &Value) -> Result<(), minijinja::Error> {
+    if value.kind() == ValueKind::String {
+        let s = value.as_str().unwrap();
+        match state.auto_escape() {
+            AutoEscape::Custom(tag) => match tag {
+                "telegram_html" => {
+                    write!(out, "{}", html::escape(s))?;
+                }
+                "telegram_markdown" => {
+                    write!(out, "{}", markdown::escape(s))?;
+                }
+                _ => {
+                    write!(out, "{}", s)?;
+                }
+            },
+            AutoEscape::Html => {
+                write!(out, "{}", html::escape(s))?;
+            }
+            _ => {
+                write!(out, "{}", s)?;
+            }
+        }
+    } else {
+        write!(out, "{}", value)?;
+    }
+    Ok(())
+}
+
+fn create_template_env(parse_mode: ParseModeOpt) -> Environment<'static> {
+    let mut env = Environment::new();
+    let auto_escape = match parse_mode {
+        ParseModeOpt::None => AutoEscape::None,
+        ParseModeOpt::Html => AutoEscape::Custom("telegram_html"),
+        ParseModeOpt::Markdown => AutoEscape::Custom("telegram_markdown"),
+    };
+    env.set_auto_escape_callback(move |_name| auto_escape);
+    env.set_formatter(telegram_escape_formatter);
+    env
 }
 
 fn print_sponsorship_message() {
@@ -402,7 +443,8 @@ async fn main() {
 
                     Box::pin(async move {
                         if use_telegram {
-                            let env = Environment::new();
+                            let env = create_template_env(parse_mode_opt);
+
                             let ctx = context! {
                                 from => data.from,
                                 via => data.via,
